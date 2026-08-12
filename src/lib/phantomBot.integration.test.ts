@@ -19,7 +19,9 @@ describe("phantomBot (integration, real HTTP)", () => {
 		expect(result).toEqual({ ok: true, status: 405, body: "" });
 	});
 
-	it("testPhantomBotConnection surfaces HTTP errors from the bot", async () => {
+	// A non-405 status on HEAD is treated as "possibly an older bot", so a server error there is
+	// deliberately not fatal on its own: the legacy probe decides the outcome.
+	it("falls back to the legacy probe when HEAD returns a server error", async () => {
 		server = await startPhantomBotLikeHttpServer({ headDbQueryStatus: 503 });
 		const result = await testPhantomBotConnection({
 			baseUrl: server.baseUrl,
@@ -30,6 +32,19 @@ describe("phantomBot (integration, real HTTP)", () => {
 			status: 200,
 			body: '{"table":{"table_name":"modules","exists":true}}',
 		});
+	});
+
+	it("surfaces the bot's HTTP error when HEAD and the legacy probe both fail", async () => {
+		server = await startPhantomBotLikeHttpServer({
+			headDbQueryStatus: 503,
+			legacyDbQueryStatus: 503,
+			legacyDbQueryBody: "bot unavailable",
+		});
+		const result = await testPhantomBotConnection({
+			baseUrl: server.baseUrl,
+			webauth: server.expectedWebauth,
+		});
+		expect(result).toEqual({ ok: false, status: 503, body: "bot unavailable" });
 	});
 
 	it("falls back for older PhantomBot behavior when HEAD does not return 405", async () => {

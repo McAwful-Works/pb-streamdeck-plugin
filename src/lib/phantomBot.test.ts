@@ -1,3 +1,4 @@
+import { Agent } from "undici";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { sendPhantomCommand, testPhantomBotConnection } from "./phantomBot";
@@ -140,25 +141,28 @@ describe("testPhantomBotConnection", () => {
 		expect(result).toEqual({ ok: false, status: 401, body: "unauthorized" });
 	});
 
-	it("fires client abort after the per-probe timeout so a hung probe can be torn down", async () => {
+	it("aborts a hung probe after the per-probe timeout and propagates AbortError", async () => {
 		vi.useFakeTimers();
 		try {
+			// Real Undici rejects an aborted request; it never resolves with a synthetic 408 status.
 			mockFetch.mockImplementation((_url: string, init?: RequestInit) => {
-				return new Promise<Response>((resolve) => {
+				return new Promise<Response>((_resolve, reject) => {
 					init?.signal?.addEventListener("abort", () => {
-						resolve(new Response("timed out", { status: 408 }));
+						const err = new Error("This operation was aborted");
+						err.name = "AbortError";
+						reject(err);
 					});
 				});
 			});
 
 			const p = testPhantomBotConnection({ baseUrl: "http://localhost:1", webauth: "x" });
+			const rejection = expect(p).rejects.toMatchObject({ name: "AbortError" });
 			await vi.advanceTimersByTimeAsync(6_000);
-			const result = await p;
-			const init = mockFetch.mock.calls[0]![1] as RequestInit;
-			expect(init.signal?.aborted).toBe(true);
-			expect(result.ok).toBe(false);
-			expect(result.status).toBe(408);
-			expect(result.body).toBe("timed out");
+			await rejection;
+
+			// A host that never answered the first probe must not be probed a second time.
+			expect(mockFetch).toHaveBeenCalledTimes(1);
+			expect((mockFetch.mock.calls[0]![1] as RequestInit).signal?.aborted).toBe(true);
 			await vi.runOnlyPendingTimersAsync();
 		} finally {
 			vi.useRealTimers();
@@ -222,5 +226,51 @@ describe("testPhantomBotConnection", () => {
 		});
 		const init = mockFetch.mock.calls[0]![1] as RequestInit;
 		expect(init.dispatcher).toBeDefined();
+	});
+
+	it("reuses one insecure-TLS agent across both probes and closes it", async () => {
+		const closeSpy = vi.spyOn(Agent.prototype, "close");
+		try {
+			mockFetch
+				.mockResolvedValueOnce(new Response("", { status: 404 }))
+				.mockResolvedValueOnce(new Response("{}", { status: 200 }));
+
+			await testPhantomBotConnection({ baseUrl: "https://x", webauth: "w", allowInsecureTls: true });
+
+			expect(mockFetch).toHaveBeenCalledTimes(2);
+			// One pooled agent for the whole check, not a fresh one per probe.
+			const headDispatcher = (mockFetch.mock.calls[0]![1] as RequestInit).dispatcher;
+			const legacyDispatcher = (mockFetch.mock.calls[1]![1] as RequestInit).dispatcher;
+			expect(headDispatcher).toBeDefined();
+			expect(legacyDispatcher).toBe(headDispatcher);
+			expect(closeSpy).toHaveBeenCalled();
+		} finally {
+			closeSpy.mockRestore();
+		}
+	});
+
+	it("closes the insecure-TLS agent even when a probe throws", async () => {
+		const closeSpy = vi.spyOn(Agent.prototype, "close");
+		try {
+			mockFetch.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+
+			await expect(
+				testPhantomBotConnection({ baseUrl: "https://x", webauth: "w", allowInsecureTls: true }),
+			).rejects.toThrow("connect ECONNREFUSED");
+			expect(closeSpy).toHaveBeenCalled();
+		} finally {
+			closeSpy.mockRestore();
+		}
+	});
+
+	it("does not create an agent when allowInsecureTls is omitted", async () => {
+		const closeSpy = vi.spyOn(Agent.prototype, "close");
+		try {
+			await testPhantomBotConnection({ baseUrl: "https://x", webauth: "w" });
+			expect((mockFetch.mock.calls[0]![1] as RequestInit).dispatcher).toBeUndefined();
+			expect(closeSpy).not.toHaveBeenCalled();
+		} finally {
+			closeSpy.mockRestore();
+		}
 	});
 });
