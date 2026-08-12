@@ -1,6 +1,6 @@
 # PhantomBot Control (Stream Deck)
 
-Control **PhantomBot** from your Elgato Stream Deck. The plugin talks to your bot over PhantomBot's **authenticated HTTP panel API**. Today you can **run chat commands** from keys (one command per key); the codebase is structured so more actions can be added later.
+Control **PhantomBot** from your Elgato Stream Deck. The plugin talks to your bot over PhantomBot's **authenticated HTTP panel API**. You can **run chat commands** from keys (one command per key); the codebase is structured so more actions can be added later.
 
 > **Not official PhantomBot software.** This project is independent: it is not affiliated with, endorsed by, or supported by the [PhantomBot](https://github.com/PhantomBot/PhantomBot) project. Author: **McAwful**.
 
