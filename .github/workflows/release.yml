@@ -2,8 +2,17 @@ name: Release
 
 # Create a GitHub Release (and git tag) when a release-branch PR is merged into main,
 # or when you run this workflow manually (pick the branch/tag to build from).
+#
+# The job refuses to publish a version whose tag already exists, so re-merging the
+# release branch without a version bump is a no-op instead of overwriting a published
+# release. Use the `force` input on a manual run to republish deliberately.
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Republish even if this version's tag already exists (overwrites the existing release)"
+        type: boolean
+        default: false
   pull_request:
     types: [closed]
     branches:
@@ -39,10 +48,30 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # Queries the remote rather than local refs: actions/checkout does a shallow
+      # fetch, so tags are not guaranteed to be present in the working copy.
+      - name: Check whether this version was already released
+        id: guard
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+        run: |
+          if [ -z "$(git ls-remote --tags origin "refs/tags/v$VERSION")" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ "$FORCE" = "true" ]; then
+            echo "::warning::Tag v$VERSION already exists; republishing because force was requested."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Tag v$VERSION already exists, so there is nothing to release. Bump the version in package.json and manifest.json to cut a new one."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and pack plugin
+        if: steps.guard.outputs.publish == 'true'
         run: npm run pack
 
       - name: Create GitHub Release
+        if: steps.guard.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.pkg.outputs.version }}
