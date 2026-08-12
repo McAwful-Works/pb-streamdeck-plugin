@@ -1,3 +1,5 @@
 node_modules/
 com.mcawful.pbstreamdeck.sdPlugin/bin/
 package-lock.json
+# Written by the Elgato CLI, which omits the trailing newline
+com.mcawful.pbstreamdeck.sdPlugin/manifest.json
