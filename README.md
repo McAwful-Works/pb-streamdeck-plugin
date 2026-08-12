@@ -133,6 +133,39 @@ This rebuilds on change and runs `streamdeck restart com.mcawful.pbstreamdeck` w
 
 Elgato CLI: [validate](https://docs.elgato.com/streamdeck/cli/commands/validate), [pack](https://docs.elgato.com/streamdeck/cli/commands/pack).
 
+### Release process
+
+Releases are cut by CI, not by hand. Two workflows drive it:
+
+| Workflow                | Trigger                                          | Does                                                |
+| ----------------------- | ------------------------------------------------ | --------------------------------------------------- |
+| `pr-release-branch.yml` | PR targeting `release`                           | Runs unit + integration tests                       |
+| `release.yml`           | `release` → `main` PR merged, or manual dispatch | Builds, packs, tags, and publishes a GitHub Release |
+
+**1. Land the work.** Branch from `release` (`hotfix/…`, `feature/…`) and open a PR **into `release`**. Tests run there.
+
+**2. Bump the version** on `release`, in its own commit — all three stay in step:
+
+```bash
+npm version 1.0.2 --no-git-tag-version
+```
+
+That updates **`package.json`** (semver, e.g. `1.0.2`) and **`package-lock.json`**. Edit **`manifest.json` → `Version`** by hand to the four-part form (e.g. `1.0.2.0`).
+
+**3. Cut the release.** Open a PR from `release` **into `main`**. Merging it runs `release.yml`, which runs `npm run pack` and publishes a GitHub Release tagged `v{version from package.json}` with the `.streamDeckPlugin` attached.
+
+**4. Reconcile.** Whenever something merges directly into `main`, merge `main` back into `release` so `release` stays a superset of `main`.
+
+#### The tag guard
+
+`release.yml` will not publish a version whose tag already exists. It logs a notice and skips the build and publish steps, so re-merging `release` without a version bump is a harmless no-op rather than an overwrite of a published release.
+
+To republish deliberately — say, to replace a broken asset — run the workflow manually from the Actions tab with **`force`** enabled. That path overwrites the existing release, so it is opt-in only and never reachable from a merge.
+
+#### Changes that should not cut a release
+
+`release.yml` only fires when the merged PR's head branch is `release` (or `release/**`). Tooling and docs changes can therefore be landed straight onto `main` from a branch named anything else (`chore/…`), which skips the workflow entirely. Merge `main` back into `release` afterward, as in step 4.
+
 ### How it talks to PhantomBot (technical)
 
 On **key press**, the plugin sends an authenticated **`PUT`** to `{baseUrl}/dbquery` with headers `user`, `message`, and `webauth`. The `message` body is normalized so chat commands start with `!`.
