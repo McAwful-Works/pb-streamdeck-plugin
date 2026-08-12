@@ -140,7 +140,7 @@ describe("testPhantomBotConnection", () => {
 		expect(result).toEqual({ ok: false, status: 401, body: "unauthorized" });
 	});
 
-	it("fires client abort after 12s so the GET can be torn down", async () => {
+	it("fires client abort after the per-probe timeout so a hung probe can be torn down", async () => {
 		vi.useFakeTimers();
 		try {
 			mockFetch.mockImplementation((_url: string, init?: RequestInit) => {
@@ -152,13 +152,46 @@ describe("testPhantomBotConnection", () => {
 			});
 
 			const p = testPhantomBotConnection({ baseUrl: "http://localhost:1", webauth: "x" });
-			await vi.advanceTimersByTimeAsync(12_000);
+			await vi.advanceTimersByTimeAsync(6_000);
 			const result = await p;
 			const init = mockFetch.mock.calls[0]![1] as RequestInit;
 			expect(init.signal?.aborted).toBe(true);
 			expect(result.ok).toBe(false);
 			expect(result.status).toBe(408);
 			expect(result.body).toBe("timed out");
+			await vi.runOnlyPendingTimersAsync();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("gives the legacy fallback its own abort budget after a slow HEAD", async () => {
+		vi.useFakeTimers();
+		try {
+			// HEAD answers just inside its own budget; the fallback must still get a full, fresh one
+			// rather than whatever the HEAD probe left over.
+			const respondAfter = (ms: number, res: () => Response) => (_url: string, init?: RequestInit) =>
+				new Promise<Response>((resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+					setTimeout(() => resolve(res()), ms);
+				});
+
+			mockFetch
+				.mockImplementationOnce(respondAfter(5_900, () => new Response("", { status: 404 })))
+				.mockImplementationOnce(respondAfter(5_900, () => new Response("{}", { status: 200 })));
+
+			const p = testPhantomBotConnection({ baseUrl: "http://slow.local", webauth: "x" });
+			await vi.advanceTimersByTimeAsync(12_000);
+
+			expect(await p).toEqual({ ok: true, status: 200, body: "{}" });
+			expect(mockFetch).toHaveBeenCalledTimes(2);
+
+			// Each probe must carry its own controller; sharing one is what starved the fallback.
+			const headSignal = (mockFetch.mock.calls[0]![1] as RequestInit).signal;
+			const legacySignal = (mockFetch.mock.calls[1]![1] as RequestInit).signal;
+			expect(legacySignal).not.toBe(headSignal);
+			expect(headSignal?.aborted).toBe(false);
+			expect(legacySignal?.aborted).toBe(false);
 			await vi.runOnlyPendingTimersAsync();
 		} finally {
 			vi.useRealTimers();

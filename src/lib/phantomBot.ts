@@ -67,9 +67,45 @@ export type TestPhantomBotConnectionOptions = {
 };
 
 /**
+ * Client-side timeout applied to **each** connection probe independently.
+ *
+ * Both probes run sequentially, so the worst case a caller can observe is twice this value.
+ * That ceiling must stay below the property inspector's 15s watchdog (`ui/phantomControl.html`),
+ * which otherwise reports "No response" while the plugin is still waiting.
+ */
+const PROBE_TIMEOUT_MS = 6_000;
+
+/**
+ * Issues a single probe request under its own abort budget.
+ *
+ * Each probe gets a fresh {@link AbortController} so a slow first probe cannot consume the
+ * budget of the one after it.
+ *
+ * @param url Absolute URL to probe.
+ * @param init Request init (method, headers, and optional insecure-TLS dispatcher).
+ * @returns Status code and response body text.
+ * @throws When the request fails or exceeds {@link PROBE_TIMEOUT_MS} (`AbortError`).
+ */
+async function probeWithTimeout(url: string, init: RequestInit): Promise<{ status: number; body: string }> {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+
+	try {
+		const res = await undiciFetch(url, { ...init, signal: controller.signal });
+		const body = await res.text();
+		return { status: res.status, body };
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+/**
  * Checks that the bot URL and webauth token work using a two-step compatibility probe:
  * 1) `HEAD /dbquery` expecting **405** (PhantomBot 3.7+ behavior),
  * 2) fallback for older bots: `GET /dbquery?table=modules&tableExists` expecting **200**.
+ *
+ * Each step carries its own {@link PROBE_TIMEOUT_MS} budget, so a slow bot on step 1 still
+ * leaves step 2 a full timeout to answer in.
  *
  * @param options Base URL, webauth header, and optional insecure HTTPS mode.
  * @returns `ok` is true when either compatibility probe returns its expected status.
@@ -82,40 +118,31 @@ export async function testPhantomBotConnection(
 	const legacyGetUrl = `${base}/dbquery?table=modules&tableExists`;
 	const headers: Record<string, string> = { webauth: options.webauth };
 
-	const controller = new AbortController();
-	const timeoutMs = 12_000;
-	const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+	const headRes = await probeWithTimeout(
+		headUrl,
+		withOptionalInsecureTls(options.allowInsecureTls, {
+			method: "HEAD",
+			headers,
+		}),
+	);
+	if (headRes.status === 405) {
+		return { ok: true, status: headRes.status, body: headRes.body };
+	}
+	if (headRes.status === 408) {
+		return { ok: false, status: headRes.status, body: headRes.body };
+	}
 
-	const headInit = withOptionalInsecureTls(options.allowInsecureTls, {
-		method: "HEAD",
-		headers,
-		signal: controller.signal,
-	});
+	// Auth is known-bad; skip legacy fallback to avoid hiding real auth failures.
+	if (headRes.status === 401 || headRes.status === 403) {
+		return { ok: false, status: headRes.status, body: headRes.body };
+	}
 
-	try {
-		const headRes = await undiciFetch(headUrl, headInit);
-		const headBody = await headRes.text();
-		if (headRes.status === 405) {
-			return { ok: true, status: headRes.status, body: headBody };
-		}
-		if (headRes.status === 408) {
-			return { ok: false, status: headRes.status, body: headBody };
-		}
-
-		// Auth is known-bad; skip legacy fallback to avoid hiding real auth failures.
-		if (headRes.status === 401 || headRes.status === 403) {
-			return { ok: false, status: headRes.status, body: headBody };
-		}
-
-		const legacyGetInit = withOptionalInsecureTls(options.allowInsecureTls, {
+	const legacyRes = await probeWithTimeout(
+		legacyGetUrl,
+		withOptionalInsecureTls(options.allowInsecureTls, {
 			method: "GET",
 			headers,
-			signal: controller.signal,
-		});
-		const legacyRes = await undiciFetch(legacyGetUrl, legacyGetInit);
-		const legacyBody = await legacyRes.text();
-		return { ok: legacyRes.status === 200, status: legacyRes.status, body: legacyBody };
-	} finally {
-		clearTimeout(timeoutId);
-	}
+		}),
+	);
+	return { ok: legacyRes.status === 200, status: legacyRes.status, body: legacyRes.body };
 }
